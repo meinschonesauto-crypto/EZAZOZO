@@ -4,7 +4,8 @@
 /*  Design tokens (style tile EZAZOZO)                                 */
 /* ------------------------------------------------------------------ */
 @theme {
-  --font-display: 'Cinzel', 'Trajan Pro', 'Cormorant Garamond', Georgia, 'Times New Roman', serif;
+  --font-display: 'Cormorant Garamond', 'Cinzel', Georgia, 'Times New Roman', serif;
+  --font-serif: 'Cormorant Garamond', Georgia, serif;
   --font-sans: 'Plus Jakarta Sans', system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   --font-accent: 'Playfair Display', Georgia, 'Times New Roman', serif;
   --font-brand: 'Syne', 'Arial Black', system-ui, sans-serif;
@@ -282,3 +283,35 @@
   0%, 100% { opacity: 0.55; transform: translateY(0); }
   50% { opacity: 1; transform: translateY(4px); }
 }
+
+@keyframes heroRise {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-hero-rise {
+  animation: heroRise 0.85s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes scrollPulse {
+  0% { transform: translateY(-100%); opacity: 0; }
+  35% { opacity: 1; }
+  70% { opacity: 1; }
+  100% { transform: translateY(220%); opacity: 0; }
+}
+
+.scroll-line-light {
+  animation: scrollPulse 2.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-hero-rise { animation: none !important; }
+  .scroll-line-light { animation: none !important; }
+}
+

@@ -41,15 +41,16 @@ export const MenuSection: React.FC<MenuSectionProps> = ({ onSelectItem }) => {
   };
 
   return (
-    <section id="braise" className="py-20 sm:py-28 bg-[#0D0D0D] relative">
+    <section id="menu" className="py-20 sm:py-28 bg-[#0D0D0D] relative">
+      <span id="braise" className="sr-only" aria-hidden="true" />
       <div className="max-w-7xl mx-auto px-5 sm:px-6 lg:px-8">
         {/* En-tête */}
         <div className="text-center max-w-3xl mx-auto mb-12 sm:mb-16" data-reveal>
-          <p className="kicker text-[#FF8A5B] justify-center">
-            <span className="w-1.5 h-1.5 bg-[#FF4500] rounded-full" />
+          <p className="kicker text-[#E6CA65] justify-center">
+            <span className="w-1.5 h-1.5 bg-[#D4AF37] rounded-full" />
             L’âme d’EZAZOZO
           </p>
-          <h2 className="h-section font-display font-bold text-white mt-3">Notre Braise au Feu de Bois</h2>
+          <h2 className="h-section font-serif font-light sm:font-normal text-white mt-3">Le Menu &amp; Notre Braise</h2>
           <p className="lead font-accent italic text-[#F5F2EB]/75 mt-4 mx-auto">
             Poissons entiers marinés aux aromates, saisis sur braises de palétuvier et nappés de notre relish
             tomate-oignon fraîchement pilée.

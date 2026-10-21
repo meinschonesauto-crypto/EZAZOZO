@@ -30,19 +30,17 @@ type FlightVariant = 'desktop' | 'mobile' | 'mobileFallback';
 
 /* ------------------------------------------------------------------ */
 /*  Timeline par morceaux : progression du scroll (0..1) -> seconde    */
-/*  du vrai Clip A. La distance de scroll (piste en svh) est           */
-/*  indépendante de la durée du clip.                                  */
 /* ------------------------------------------------------------------ */
 const CLIP_END = 8.0; // dernière frame (porte du salon)
 const TIMELINE: Array<{ p: number; t: number }> = [
   { p: 0.0, t: 0 },
-  { p: 0.06, t: 0 }, // court maintien sur la frame d'ouverture (titre lisible)
+  { p: 0.06, t: 0 }, // court maintien sur la frame d'ouverture
   { p: 0.48, t: 4.0 }, // Scène 01 : rue -> grill au palétuvier et maître-grilleur
-  { p: 0.86, t: CLIP_END }, // Scène 02 : entrée de la terrasse -> courbe en S -> porte du salon
+  { p: 0.86, t: CLIP_END }, // Scène 02 : entrée de la terrasse -> porte du salon
   { p: 1.0, t: CLIP_END } // maintien sur la porte du salon
 ];
 
-// Chapitres de texte HTML synchronisés sans trou (couvrent 100% de la piste)
+// Chapitres de texte HTML synchronisés
 const BEATS: Array<{ from: number; to: number }> = [
   { from: 0, to: 0.22 }, // Scène 01 : titre principal (0 - 1.5 s)
   { from: 0.22, to: 0.72 }, // Scène 02 : le feu / le maître-grilleur (2 - 5 s)
@@ -102,24 +100,45 @@ export const FlyThroughCanvas: React.FC = () => {
   );
   const [beat, setBeat] = useState<number>(0);
 
+  // Hidden diagnostic overlay (?debug=1)
+  const [isDebug, setIsDebug] = useState<boolean>(false);
+  const [diagInfo, setDiagInfo] = useState({
+    drawnIdx: 0,
+    targetIdx: 1,
+    frameCount: 0,
+    loadedCount: 0,
+    variantName: '',
+    connType: '',
+    lastError: 'aucune'
+  });
+
   const story = EZAZOZO_CONTENT.flightStory;
-  const sceneHero = story[0];
   const sceneFire = story[1];
   const sceneLounge = story[3];
 
-  /* Manifest (une seule requête par montage ; en dev, StrictMode monte deux fois -> requête annulée) */
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const p = new URLSearchParams(window.location.search);
+      setIsDebug(p.get('debug') === '1');
+    }
+  }, []);
+
+  /* Manifest (une seule requête par montage) */
   useEffect(() => {
     const ctrl = new AbortController();
     fetch('/frames/manifest.json', { signal: ctrl.signal, cache: 'no-cache' })
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`manifest ${r.status}`))))
       .then((m: Manifest) => setManifest(m))
       .catch((err) => {
-        if (err?.name !== 'AbortError') console.warn('Manifest des frames indisponible, poster conservé.', err);
+        if (err?.name !== 'AbortError') {
+          console.warn('[FlyThrough] Manifest des frames indisponible, poster conservé.', err);
+          setDiagInfo((prev) => ({ ...prev, lastError: `Manifest indisponible: ${err?.message || err}` }));
+        }
       });
     return () => ctrl.abort();
   }, []);
 
-  /* Variante mobile (HD vs Fallback basse bande passante) / desktop + préférence de mouvement réduit */
+  /* Détection de la variante d'affichage et préférence de mouvement */
   useEffect(() => {
     const mq = window.matchMedia(MOBILE_QUERY);
     const rm = window.matchMedia('(prefers-reduced-motion: reduce)');
@@ -142,7 +161,7 @@ export const FlyThroughCanvas: React.FC = () => {
     };
   }, []);
 
-  /* Moteur unique : scroll -> rAF -> frame la plus proche chargée -> canvas */
+  /* Moteur de lecture vidéo au scroll */
   useEffect(() => {
     const canvas = canvasRef.current;
     const track = trackRef.current;
@@ -166,102 +185,112 @@ export const FlyThroughCanvas: React.FC = () => {
     const images: Array<HTMLImageElement | undefined> = new Array(count + 1);
     const requested = new Uint8Array(count + 1);
     let inFlight = 0;
+    let loadedCount = 0;
     let lastDrawnImg: HTMLImageElement | null = null;
+    let lastErrorMsg = 'aucune';
 
-    // Fenêtre glissante bornée en RAM : conserve ~26 frames actives autour de targetIdx au lieu de 161
-    const CACHE_RADIUS_AHEAD = 16;
-    const CACHE_RADIUS_BEHIND = 8;
+    const maxConcurrent = variant === 'desktop' ? 8 : 6;
+    const ctx = canvas.getContext('2d', { alpha: true });
 
-    const pruneCache = (center: number) => {
-      for (let k = 2; k < count; k++) {
-        if (images[k] && (k < center - CACHE_RADIUS_BEHIND || k > center + CACHE_RADIUS_AHEAD)) {
-          images[k]!.src = '';
-          images[k] = undefined;
-          requested[k] = 0;
-        }
-      }
+    const updateDiag = () => {
+      if (!isDebug) return;
+      const nav = navigator as unknown as {
+        connection?: { saveData?: boolean; effectiveType?: string; downlink?: number };
+      };
+      const c = nav?.connection;
+      const connStr = c
+        ? `${c.effectiveType || 'inconnu'}${c.saveData ? ' [saveData]' : ''}${c.downlink ? ` (${c.downlink}Mb/s)` : ''}`
+        : 'inconnue';
+
+      setDiagInfo({
+        drawnIdx,
+        targetIdx,
+        frameCount: count,
+        loadedCount,
+        variantName: `${variant} (${set ? `${set.width}x${set.height}` : 'chargement'})`,
+        connType: connStr,
+        lastError: lastErrorMsg
+      });
     };
 
-    const maxConcurrent = variant === 'mobile' ? 3 : 5;
-    const ctx = canvas.getContext('2d', { alpha: true });
+    const paintImage = (img: HTMLImageElement) => {
+      if (!ctx) return;
+      const cw = canvas.width;
+      const ch = canvas.height;
+      if (cw <= 0 || ch <= 0) return;
+      const s = Math.max(cw / img.naturalWidth, ch / img.naturalHeight);
+      const dw = Math.round(img.naturalWidth * s);
+      const dh = Math.round(img.naturalHeight * s);
+      const dx = Math.round((cw - dw) / 2);
+      const dy = Math.round((ch - dh) / 2);
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(img, dx, dy, dw, dh);
+    };
 
     const sizeCanvas = () => {
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
       const w = Math.max(1, Math.round(canvas.clientWidth * dpr));
       const h = Math.max(1, Math.round(canvas.clientHeight * dpr));
-      if (canvas.width !== w || canvas.height !== h) {
+      // Évite de réinitialiser le canvas sur les micro-variations de l'adresse bar mobile (< 24px)
+      const widthChanged = Math.abs(canvas.width - w) > 2;
+      const heightChanged = Math.abs(canvas.height - h) > 24;
+      if (widthChanged || heightChanged) {
         canvas.width = w;
         canvas.height = h;
-        drawnIdx = 0; // le redimensionnement efface le canvas : il faut repeindre
+        // Repeindre immédiatement le dernier visuel pour éviter tout écran blanc
+        if (lastDrawnImg) {
+          paintImage(lastDrawnImg);
+        }
         needsDraw = true;
       }
     };
 
+    // Trouve la frame chargée la plus proche de idx, dans toute la séquence
     const nearestLoaded = (idx: number) => {
       if (images[idx]) return idx;
-      for (let d = 1; d <= Math.max(CACHE_RADIUS_AHEAD, CACHE_RADIUS_BEHIND); d++) {
-        const a = idx - d * direction;
-        const b = idx + d * direction;
-        if (a >= 1 && a <= count && images[a]) return a;
-        if (b >= 1 && b <= count && images[b]) return b;
+      for (let d = 1; d <= count; d++) {
+        const ahead = idx + d * direction;
+        const behind = idx - d * direction;
+        if (ahead >= 1 && ahead <= count && images[ahead]) return ahead;
+        if (behind >= 1 && behind <= count && images[behind]) return behind;
       }
-      if (images[1]) return 1;
-      if (images[count]) return count;
-      return 0;
+      // Si aucune frame n'est trouvée, conserver l'index déjà dessiné plutôt que de sauter à 1
+      return drawnIdx || (images[1] ? 1 : 0);
     };
 
     const draw = () => {
       if (!ctx || reducedMotion || !count) return;
       const idx = nearestLoaded(targetIdx);
-      if (idx && idx !== drawnIdx && images[idx]) {
+      if (idx && images[idx]) {
         const img = images[idx]!;
         lastDrawnImg = img;
-        const cw = canvas.width;
-        const ch = canvas.height;
-        const s = Math.max(cw / img.naturalWidth, ch / img.naturalHeight);
-        const dw = img.naturalWidth * s;
-        const dh = img.naturalHeight * s;
-        ctx.imageSmoothingEnabled = true;
-        ctx.imageSmoothingQuality = 'high';
-        ctx.drawImage(img, (cw - dw) / 2, (ch - dh) / 2, dw, dh);
+        paintImage(img);
         drawnIdx = idx;
         canvas.style.opacity = '1';
+        updateDiag();
       } else if (!drawnIdx && lastDrawnImg) {
-        const cw = canvas.width;
-        const ch = canvas.height;
-        const s = Math.max(cw / lastDrawnImg.naturalWidth, ch / lastDrawnImg.naturalHeight);
-        const dw = lastDrawnImg.naturalWidth * s;
-        const dh = lastDrawnImg.naturalHeight * s;
-        ctx.drawImage(lastDrawnImg, (cw - dw) / 2, (ch - dh) / 2, dw, dh);
+        paintImage(lastDrawnImg);
+      } else if (!drawnIdx && !images[1]) {
+        console.warn('[FlyThrough] En attente de la première frame, affichage du poster');
       }
     };
 
     const urlFor = (i: number) =>
       `${set!.pathPrefix}${String(i).padStart(set!.padding, '0')}.${set!.format}?v=${manifest!.version}`;
 
-    // Choisit la prochaine frame à charger dans la fenêtre glissante
+    // Sélectionne la frame la plus prioritaire : spirale autour de targetIdx
     const pickNext = () => {
-      for (let d = 0; d <= CACHE_RADIUS_AHEAD; d++) {
+      // 1. Frame cible immédiate
+      if (!requested[targetIdx]) return targetIdx;
+      // 2. Frames immédiates dans la direction de lecture
+      for (let d = 1; d <= count; d++) {
         const ahead = targetIdx + d * direction;
-        const behind = targetIdx - d * direction;
-        if (
-          ahead >= 1 &&
-          ahead <= count &&
-          ahead <= targetIdx + CACHE_RADIUS_AHEAD &&
-          ahead >= targetIdx - CACHE_RADIUS_BEHIND &&
-          !requested[ahead]
-        ) {
+        if (ahead >= 1 && ahead <= count && !requested[ahead]) {
           return ahead;
         }
-        if (
-          d > 0 &&
-          d <= CACHE_RADIUS_BEHIND &&
-          behind >= 1 &&
-          behind <= count &&
-          behind <= targetIdx + CACHE_RADIUS_AHEAD &&
-          behind >= targetIdx - CACHE_RADIUS_BEHIND &&
-          !requested[behind]
-        ) {
+        const behind = targetIdx - d * direction;
+        if (behind >= 1 && behind <= count && !requested[behind]) {
           return behind;
         }
       }
@@ -271,38 +300,36 @@ export const FlyThroughCanvas: React.FC = () => {
     const pump = () => {
       if (disposed || !set || reducedMotion) return;
       while (inFlight < maxConcurrent) {
-        const i = requested[1] ? (requested[count] ? pickNext() : count) : 1;
+        const i = pickNext();
         if (!i) return;
         requested[i] = 1;
         inFlight++;
         const img = new Image();
         img.decoding = 'async';
         if (i === 1) (img as HTMLImageElement & { fetchPriority?: string }).fetchPriority = 'high';
+
         img.onload = () => {
           inFlight--;
           if (disposed) return;
-          // Libérer immédiatement si la frame est devenue périmée pendant le téléchargement
-          if (
-            i > 1 &&
-            i < count &&
-            (i < targetIdx - CACHE_RADIUS_BEHIND - 4 || i > targetIdx + CACHE_RADIUS_AHEAD + 4)
-          ) {
-            img.src = '';
-            requested[i] = 0;
-            pump();
-            return;
-          }
           images[i] = img;
+          loadedCount++;
+          // Redessiner si cette frame est plus proche de la cible que la frame affichée
           if (Math.abs(i - targetIdx) < Math.abs(drawnIdx - targetIdx) || !drawnIdx) {
             needsDraw = true;
             schedule();
           }
+          updateDiag();
           pump();
         };
-        img.onerror = () => {
+
+        img.onerror = (e) => {
           inFlight--;
+          lastErrorMsg = `Frame ${i} non chargée (${urlFor(i)})`;
+          console.warn(`[FlyThrough] Erreur chargement frame ${i}:`, urlFor(i), e);
+          updateDiag();
           if (!disposed) pump();
         };
+
         img.src = urlFor(i);
       }
     };
@@ -313,7 +340,7 @@ export const FlyThroughCanvas: React.FC = () => {
       const rect = track.getBoundingClientRect();
       const max = track.offsetHeight - window.innerHeight;
       const p = max > 0 ? clamp01(-rect.top / max) : 0;
-      if (p !== lastProgress) direction = p > lastProgress ? 1 : -1;
+      if (p !== lastProgress) direction = p >= lastProgress ? 1 : -1;
       lastProgress = p;
 
       if (count) {
@@ -322,10 +349,10 @@ export const FlyThroughCanvas: React.FC = () => {
         if (idx !== targetIdx) {
           targetIdx = idx;
           needsDraw = true;
-          pruneCache(idx);
           pump();
         }
       }
+
       if (needsDraw) {
         needsDraw = false;
         draw();
@@ -342,6 +369,7 @@ export const FlyThroughCanvas: React.FC = () => {
     const schedule = () => {
       if (!raf) raf = requestAnimationFrame(update);
     };
+
     const onResize = () => {
       sizeCanvas();
       schedule();
@@ -349,20 +377,23 @@ export const FlyThroughCanvas: React.FC = () => {
 
     sizeCanvas();
     window.addEventListener('scroll', schedule, { passive: true });
+    window.addEventListener('touchmove', schedule, { passive: true });
     window.addEventListener('resize', onResize);
     const ro = new ResizeObserver(onResize);
     ro.observe(canvas);
     pump();
     schedule();
+    updateDiag();
 
     return () => {
       disposed = true;
       if (raf) cancelAnimationFrame(raf);
       window.removeEventListener('scroll', schedule);
+      window.removeEventListener('touchmove', schedule);
       window.removeEventListener('resize', onResize);
       ro.disconnect();
     };
-  }, [manifest, variant, reducedMotion]);
+  }, [manifest, variant, reducedMotion, isDebug]);
 
   const smoothTo = (id: string) => (e: React.MouseEvent) => {
     const el = document.getElementById(id);
@@ -383,7 +414,7 @@ export const FlyThroughCanvas: React.FC = () => {
       aria-label="Visite immersive d’EZAZOZO en vue subjective"
     >
       <div className="flight-stage sticky top-0 w-full overflow-hidden bg-[#1a120c]">
-        {/* 1. Poster : première frame du clip, affichée immédiatement pour tous les visiteurs */}
+        {/* 1. Poster : première frame du clip, affichée immédiatement */}
         <picture>
           <source
             media={MOBILE_QUERY}
@@ -407,57 +438,98 @@ export const FlyThroughCanvas: React.FC = () => {
           style={{ width: '100%', height: '100%', opacity: 0, display: reducedMotion ? 'none' : 'block' }}
         />
 
-        {/* 3. Ambiance : vignette + grain + lisibilité du texte en bas */}
+        {/* 3. Ambiance : vignette + grain + dégradé de contraste cinématique */}
         <div className="absolute inset-0 pointer-events-none flight-vignette" />
         <div className="absolute inset-0 pointer-events-none grain" />
-        <div className="absolute inset-x-0 bottom-0 h-[62%] pointer-events-none bg-gradient-to-t from-[#0D0D0D]/90 via-[#0D0D0D]/45 to-transparent" />
+        
+        {/* Scrim dégradé cinématique : renforce le contraste du texte sans boîte plate */}
+        <div className="absolute inset-0 pointer-events-none bg-gradient-to-t from-[#050505]/95 via-[#0D0D0D]/65 to-transparent lg:bg-[radial-gradient(ellipse_at_bottom_left,_rgba(5,5,5,0.95)_0%,_rgba(13,13,13,0.70)_45%,_transparent_75%)]" />
 
-        {/* Lien d'évitement */}
+        {/* Passer la visite : lien discret en bas à droite, petit, sans pilule ni bordure */}
         <a
-          href="#braise"
-          onClick={smoothTo('braise')}
-          className="flight-skip absolute right-3 sm:right-6 z-30 inline-flex items-center gap-1.5 min-h-[44px] px-4 text-[11px] uppercase tracking-[0.18em] font-semibold text-[#F5F2EB]/85 bg-black/45 backdrop-blur-md border border-white/15 rounded-full hover:text-white"
+          href="#menu"
+          onClick={smoothTo('menu')}
+          className="absolute bottom-4 right-4 sm:bottom-6 sm:right-8 z-30 inline-flex items-center gap-1.5 text-[11px] uppercase tracking-widest font-medium text-[#F5F2EB]/65 hover:text-white transition-colors focus:outline-none focus:ring-1 focus:ring-white/40"
         >
-          Passer la visite
-          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+          <span>Passer la visite</span>
+          <svg className="w-3.5 h-3.5 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 14l-7 7m0 0l-7-7m7 7V3" />
           </svg>
         </a>
 
-        {/* Textes HTML réels, synchronisés sur les secondes du clip (zone basse de la scène) */}
+        {/* Textes HTML réels, synchronisés sur le scroll */}
         <div className="flight-copy absolute inset-x-0 bottom-0 z-20 px-5 sm:px-10 lg:px-16">
           <div className="relative max-w-xl lg:max-w-2xl">
-            {/* Scène 01 — Arrivée */}
+            {/* Scène 01 — Hero d'arrivée (Redesign Haute Gastronomie) */}
             <div className={beatClass(0)} aria-hidden={beat !== 0}>
-              <p className="kicker text-[#FF8A5B]">
-                <span className="w-1.5 h-1.5 rounded-full bg-[#FF4500]" />
+              {/* Eyebrow : ivoire / or pâle avec filet doré fin */}
+              <p className="inline-flex items-center text-[#E6CA65] text-[11px] sm:text-xs uppercase tracking-[0.24em] font-medium font-sans">
+                <span className="inline-block w-5 sm:w-6 h-[1px] bg-[#D4AF37] mr-2.5 opacity-80" aria-hidden="true" />
                 Lomé · Agoé Assiyéyé
               </p>
-              <h1 className="h-hero font-display font-bold text-white mt-3">{sceneHero.copyH1}</h1>
-              <p className="font-accent italic text-[15px] sm:text-lg text-[#F5F2EB]/90 mt-3 max-w-md">
-                {sceneHero.subCopy}
+
+              {/* Titre : serif raffiné light/medium, sentence case, accent braise */}
+              <h1 className="font-serif font-light sm:font-normal text-[2.15rem] sm:text-[2.85rem] lg:text-[3.7rem] xl:text-[4.25rem] leading-[1.1] text-white tracking-tight mt-3 text-balance drop-shadow-[0_2px_16px_rgba(0,0,0,0.85)] animate-hero-rise">
+                Ici, le poisson se{' '}
+                <span className="text-transparent bg-clip-text bg-gradient-to-r from-[#FF6B35] via-[#FF4500] to-[#D4AF37] font-normal">
+                  braise
+                </span>{' '}
+                au feu de bois.
+              </h1>
+
+              {/* Sous-titre : court, sans-serif lisible, ivoire à 85% */}
+              <p className="font-sans text-[14px] sm:text-base text-[#F5F2EB]/85 leading-relaxed mt-3.5 max-w-lg">
+                Haute braise au feu de palétuvier et lounge gastronomique. Poissons entiers braisés minute, terrasse couverte et salon VIP.
               </p>
-              <div className="mt-5 flex flex-wrap gap-3">
-                <a href="#reserver" onClick={smoothTo('reserver')} className="btn btn-ember">
-                  {sceneHero.cta}
+
+              {/* CTAs : 1 bouton primaire braise + 1 lien texte fléché vers le Menu */}
+              <div className="mt-6 flex flex-wrap items-center gap-4 sm:gap-6">
+                <a
+                  href="#reserver"
+                  onClick={smoothTo('reserver')}
+                  className="btn btn-ember shadow-[0_0_24px_rgba(255,69,0,0.35)] active:scale-[0.98]"
+                >
+                  Réserver une table
                 </a>
-                <a href="#braise" onClick={smoothTo('braise')} className="btn btn-ghost">
-                  La carte
+                <a
+                  href="#menu"
+                  onClick={smoothTo('menu')}
+                  className="group inline-flex items-center gap-2 text-xs sm:text-sm uppercase tracking-wider font-semibold text-[#F5F2EB]/90 hover:text-[#D4AF37] transition-colors py-2 px-1 focus:outline-none focus:ring-2 focus:ring-[#D4AF37] rounded"
+                >
+                  <span>Voir le menu</span>
+                  <svg
+                    className="w-4 h-4 transition-transform group-hover:translate-x-1 text-[#D4AF37]"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                    aria-hidden="true"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 8l4 4m0 0l-4 4m4-4H3" />
+                  </svg>
                 </a>
               </div>
-              <p className="scroll-hint mt-5 text-[11px] uppercase tracking-[0.25em] text-[#D4AF37]/90">
-                Faites défiler pour entrer
-              </p>
+
+              {/* Repère de défilement : fine ligne verticale avec pulsation lumineuse */}
+              <div className="mt-6 sm:mt-8 flex items-center gap-3">
+                <div className="relative w-[1px] h-7 bg-white/20 overflow-hidden" aria-hidden="true">
+                  <span className="scroll-line-light absolute inset-x-0 h-3 bg-gradient-to-b from-transparent via-[#FF6B35] to-transparent w-full" />
+                </div>
+                <span className="text-[10px] uppercase tracking-[0.25em] font-medium text-[#F5F2EB]/80 select-none">
+                  Défiler
+                </span>
+              </div>
             </div>
 
             {/* Scène 02 — Terrasse & braise */}
             <div className={beatClass(1)} aria-hidden={beat !== 1}>
-              <p className="kicker text-[#FF8A5B]">
-                <span className="w-1.5 h-1.5 rounded-full bg-[#FF4500]" />
+              <p className="inline-flex items-center text-[#E6CA65] text-[11px] sm:text-xs uppercase tracking-[0.22em] font-medium font-sans">
+                <span className="inline-block w-5 sm:w-6 h-[1px] bg-[#D4AF37] mr-2.5 opacity-80" aria-hidden="true" />
                 Le maître-grilleur
               </p>
-              <h2 className="h-hero font-display font-bold text-white mt-3">{sceneFire.copyH1}</h2>
-              <p className="text-[15px] sm:text-base text-[#F5F2EB]/85 leading-relaxed mt-3 max-w-md">
+              <h2 className="font-serif font-light sm:font-normal text-[2rem] sm:text-[2.6rem] lg:text-[3.2rem] leading-[1.12] text-white tracking-tight mt-3 text-balance">
+                {sceneFire.copyH1}
+              </h2>
+              <p className="font-sans text-[14px] sm:text-base text-[#F5F2EB]/85 leading-relaxed mt-3 max-w-md">
                 {sceneFire.subCopy}
               </p>
               <div className="mt-5">
@@ -469,27 +541,42 @@ export const FlyThroughCanvas: React.FC = () => {
 
             {/* Porte du salon — amorce de la Scène 03 */}
             <div className={beatClass(2)} aria-hidden={beat !== 2}>
-              <p className="kicker text-[#D4AF37]">
-                <span className="w-1.5 h-1.5 rounded-full bg-[#D4AF37]" />
+              <p className="inline-flex items-center text-[#D4AF37] text-[11px] sm:text-xs uppercase tracking-[0.22em] font-medium font-sans">
+                <span className="inline-block w-5 sm:w-6 h-[1px] bg-[#D4AF37] mr-2.5 opacity-80" aria-hidden="true" />
                 Le salon · VIP 8 places
               </p>
-              <h2 className="h-hero font-display font-bold text-white mt-3">{sceneLounge.copyH1}</h2>
-              <p className="text-[15px] sm:text-base text-[#F5F2EB]/85 leading-relaxed mt-3 max-w-md">
+              <h2 className="font-serif font-light sm:font-normal text-[2rem] sm:text-[2.6rem] lg:text-[3.2rem] leading-[1.12] text-white tracking-tight mt-3 text-balance">
+                {sceneLounge.copyH1}
+              </h2>
+              <p className="font-sans text-[14px] sm:text-base text-[#F5F2EB]/85 leading-relaxed mt-3 max-w-md">
                 {sceneLounge.subCopy}
               </p>
-              <div className="mt-5 flex flex-wrap gap-3">
+              <div className="mt-5 flex flex-wrap items-center gap-4 sm:gap-6">
                 <a href="#reserver" onClick={smoothTo('reserver')} className="btn btn-gold">
                   {sceneLounge.cta}
                 </a>
-                <a href="#braise" onClick={smoothTo('braise')} className="btn btn-ghost">
-                  Continuer
+                <a
+                  href="#menu"
+                  onClick={smoothTo('menu')}
+                  className="group inline-flex items-center gap-2 text-xs sm:text-sm uppercase tracking-wider font-semibold text-[#F5F2EB]/90 hover:text-[#D4AF37] transition-colors py-2 px-1 focus:outline-none focus:ring-2 focus:ring-[#D4AF37] rounded"
+                >
+                  <span>Voir le menu</span>
+                  <svg
+                    className="w-4 h-4 transition-transform group-hover:translate-x-1 text-[#D4AF37]"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                    aria-hidden="true"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 8l4 4m0 0l-4 4m4-4H3" />
+                  </svg>
                 </a>
               </div>
             </div>
           </div>
         </div>
 
-        {/* Fine barre de progression de la visite (décorative) */}
+        {/* Fine barre de progression de la visite */}
         <div className="absolute left-0 right-0 bottom-0 h-[2px] bg-white/10 z-30 pointer-events-none">
           <div
             ref={barRef}
@@ -497,6 +584,25 @@ export const FlyThroughCanvas: React.FC = () => {
             style={{ transform: 'scaleX(0)' }}
           />
         </div>
+
+        {/* 4. Overlay de diagnostic secret (affiché UNIQUEMENT si ?debug=1) */}
+        {isDebug && (
+          <aside
+            id="debug-overlay"
+            aria-label="Diagnostic de vol"
+            className="fixed bottom-3 left-3 z-50 bg-black/90 text-[#39FF14] text-[11px] p-3 rounded-lg border border-[#39FF14]/40 font-mono shadow-2xl backdrop-blur-md pointer-events-none max-w-xs leading-snug"
+          >
+            <div className="text-[10px] uppercase font-bold tracking-wider text-white border-b border-white/20 pb-1 mb-1.5 flex items-center justify-between">
+              <span>DEBUG VOL FPV</span>
+              <span className="text-[#39FF14] animate-pulse">● LIVE</span>
+            </div>
+            <div>Frame : <span className="text-white font-bold">{diagInfo.drawnIdx}</span> / {diagInfo.frameCount} (cible: {diagInfo.targetIdx})</div>
+            <div>Chargées : <span className="text-white font-bold">{diagInfo.loadedCount}</span> / {diagInfo.frameCount} ({diagInfo.frameCount ? Math.round((diagInfo.loadedCount / diagInfo.frameCount) * 100) : 0}%)</div>
+            <div>Set : <span className="text-amber-300">{diagInfo.variantName}</span></div>
+            <div>Connexion : <span className="text-cyan-300">{diagInfo.connType}</span></div>
+            <div>Erreur : <span className={diagInfo.lastError === 'aucune' ? 'text-emerald-400' : 'text-rose-400 font-bold'}>{diagInfo.lastError}</span></div>
+          </aside>
+        )}
       </div>
     </section>
   );
