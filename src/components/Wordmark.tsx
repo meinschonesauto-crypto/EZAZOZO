@@ -12,17 +12,16 @@ export const Wordmark: React.FC<WordmarkProps> = ({
   showSubtitle = true
 }) => {
   const isSm = size === 'sm';
-  const isLg = size === 'lg';
 
   return (
-    <div className={`inline-flex flex-col items-start select-none ${className}`}>
-      <div className="flex items-center gap-2">
+    <div className={`inline-flex flex-col items-start justify-center select-none ${className}`}>
+      <div className="flex items-center gap-2 leading-none">
         {/* Primal West-African Ember & Fish Flame Icon */}
         <svg
           viewBox="0 0 32 32"
           fill="none"
           xmlns="http://www.w3.org/2000/svg"
-          className={isSm ? 'w-5 h-5' : isLg ? 'w-6 h-6 sm:w-8 sm:h-8' : 'w-6 h-6'}
+          className={isSm ? 'w-4.5 h-4.5 shrink-0' : 'w-5 h-5 shrink-0'}
           aria-hidden="true"
         >
           {/* Flame Embers */}
@@ -47,8 +46,8 @@ export const Wordmark: React.FC<WordmarkProps> = ({
 
         {/* Brand Typographic Wordmark */}
         <span
-          className={`font-brand tracking-[0.15em] sm:tracking-[0.18em] font-extrabold text-white uppercase ${
-            isSm ? 'text-lg' : isLg ? 'text-2xl sm:text-3xl' : 'text-xl'
+          className={`font-brand tracking-[0.14em] font-extrabold text-white uppercase whitespace-nowrap leading-none ${
+            isSm ? 'text-[0.98rem]' : 'text-[1.08rem]'
           }`}
         >
           EZA<span className="text-[#FF4500]">ZOZO</span>
@@ -57,8 +56,8 @@ export const Wordmark: React.FC<WordmarkProps> = ({
 
       {showSubtitle && (
         <span
-          className={`font-sans text-[#D4AF37] tracking-[0.20em] uppercase font-semibold mt-0.5 ${
-            isSm ? 'text-[9px]' : isLg ? 'text-[10px] sm:text-xs' : 'text-[10px]'
+          className={`font-sans text-[#D4AF37] tracking-[0.16em] uppercase font-semibold mt-1 whitespace-nowrap leading-none ${
+            isSm ? 'text-[8px]' : 'text-[8.75px]'
           }`}
         >
           Haute Braise &bull; Lomé
