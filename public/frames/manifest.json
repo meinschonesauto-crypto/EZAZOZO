@@ -1,0 +1,38 @@
+{
+  "source": "Clip A (Seedance 2.0, 8 s, 720p, 24 fps) — prise de vue continue réelle",
+  "version": "clipa-2.1.0",
+  "fps": 20,
+  "frameCount": 161,
+  "durationSeconds": 8.05,
+  "pattern": "{prefix}{index:4}.webp",
+  "desktop": {
+    "width": 1280,
+    "height": 720,
+    "pathPrefix": "/frames/clip-a/desktop/f-",
+    "padding": 4,
+    "format": "webp",
+    "totalBytes": 7083588
+  },
+  "mobile": {
+    "width": 640,
+    "height": 960,
+    "pathPrefix": "/frames/clip-a/mobile-640/f-",
+    "padding": 4,
+    "format": "webp",
+    "totalBytes": 4063592
+  },
+  "mobileFallback": {
+    "width": 480,
+    "height": 720,
+    "pathPrefix": "/frames/clip-a/mobile-480/f-",
+    "padding": 4,
+    "format": "webp",
+    "totalBytes": 2988546
+  },
+  "poster": {
+    "desktop": "/images/poster-desktop.webp",
+    "mobile": "/images/poster-mobile.webp",
+    "mobileFallback": "/images/poster-mobile-480.webp"
+  },
+  "generatedAt": "2026-10-21T10:52:20.209Z"
+}
